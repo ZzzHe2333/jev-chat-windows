@@ -4,6 +4,7 @@ name: release
 on:
   push:
     tags: ['v*']
+    branches: ['feat/auto-send-whitelist']
   workflow_dispatch:
 
 permissions:
