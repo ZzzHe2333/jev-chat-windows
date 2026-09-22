@@ -10,6 +10,8 @@ on:
 permissions:
   contents: write  # 建 Release 要写权限
   statuses: write  # 功能分支试打包时回写 run 链接，便于定位产物
+  issues: write    # 本次功能分支试打包把 run id 写到 PR 评论，完成后会清理
+  pull-requests: write
 
 jobs:
   build:
@@ -32,6 +34,14 @@ jobs:
             Authorization = "Bearer $env:GH_TOKEN"
             Accept = "application/vnd.github+json"
           } -ContentType 'application/json' -Uri "https://api.github.com/repos/${{ github.repository }}/statuses/${{ github.sha }}" -Body $body
+
+      - name: 在 PR 标记试打包运行
+        if: github.ref == 'refs/heads/feat/auto-send-whitelist'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr comment 1 --repo $env:GITHUB_REPOSITORY --body "AUTO_BUILD_RUN=${{ github.run_id }} STATUS=running"
 
       - name: 写入版本号（tag 用 tag 名，手动触发用短 SHA）
         shell: pwsh
@@ -77,6 +87,15 @@ jobs:
         with:
           files: ${{ steps.pack.outputs.zip }}
           generate_release_notes: true
+
+      - name: 在 PR 回写试打包结果
+        if: always() && github.ref == 'refs/heads/feat/auto-send-whitelist'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          gh pr comment 1 --repo $env:GITHUB_REPOSITORY --body "AUTO_BUILD_RUN=${{ github.run_id }} STATUS=$env:JOB_STATUS ARTIFACT=jev-chat-windows"
 
       - name: 回写构建结果
         if: always()
