@@ -249,7 +249,7 @@ class Overlay:
         self._build_settings()
         footer = QHBoxLayout()
         footer.setContentsMargins(20, 9, 8, 8)
-        footer.addWidget(_label(f"仅填入输入框 · 发送由你确认 · v{VERSION}", 11, _MUTED), 1)
+        footer.addWidget(_label(f"默认手动发送 · 自动发送仅限白名单且微信须在前台 · v{VERSION}", 11, _MUTED), 1)
         grip = QSizeGrip(self.win)
         grip.setFixedSize(16, 16)
         footer.addWidget(grip, 0, Qt.AlignBottom)
@@ -483,6 +483,26 @@ class Overlay:
         box.addWidget(self._hint(
             "开了以后群聊里可以选回复给谁，候选会针对 TA 写，填入时可带 @。关了就正常回复。"
         ))
+        auto_row = QHBoxLayout()
+        auto_row.addWidget(_label("自动发送（白名单）", 13), 1)
+        self.autoSendSwitch = SwitchButton()
+        self.autoSendSwitch.setOnText("开")
+        self.autoSendSwitch.setOffText("关")
+        self.autoSendSwitch.setAccessibleName("自动发送")
+        auto_row.addWidget(self.autoSendSwitch)
+        box.addLayout(auto_row)
+        whitelist_label = _label("自动发送白名单", 13)
+        box.addWidget(whitelist_label)
+        self.autoWhitelistEdit = PlainTextEdit()
+        self.autoWhitelistEdit.setPlaceholderText("每行一个会话名，例如：\n张三\n文件传输助手")
+        self.autoWhitelistEdit.setAccessibleName("自动发送白名单")
+        self.autoWhitelistEdit.setFixedHeight(92)
+        whitelist_label.setBuddy(self.autoWhitelistEdit)
+        box.addWidget(self.autoWhitelistEdit)
+        box.addWidget(self._hint(
+            "自动发送默认关闭。开启后只对这里精确匹配的当前会话生效；生成完成时微信主窗口还必须是系统前台窗口，"
+            "否则只保留候选、不发送。"
+        ))
         update_row = QHBoxLayout()
         update_row.addWidget(_label("启动时检查更新", 13), 1)
         self.updateSwitch = SwitchButton()
@@ -701,6 +721,8 @@ class Overlay:
         self.styleEdit.setText(settings.style())
         self.contextBox.setValue(settings.context())
         self.targetSwitch.setChecked(settings.reply_target())
+        self.autoSendSwitch.setChecked(settings.auto_send())
+        self.autoWhitelistEdit.setPlainText("\n".join(settings.auto_send_whitelist()))
         self._set_group(self.jev, settings.jev_provider(), settings.jev_model())
         self._set_group(self.draft, settings.draft_provider(), settings.draft_model())
         self.baseEdit.setText(settings.draft_base_url())
@@ -722,6 +744,11 @@ class Overlay:
         if draft_provider in providers.CUSTOM and not base:
             self._settings_feedback("自定义来源要填 Base URL。", error=True)
             self.baseEdit.setFocus()
+            return
+        whitelist_text = self.autoWhitelistEdit.toPlainText().strip()
+        if self.autoSendSwitch.isChecked() and not whitelist_text:
+            self._settings_feedback("开启自动发送前，必须至少配置一个白名单会话。", error=True)
+            self.autoWhitelistEdit.setFocus()
             return
         for group, provider in ((self.jev, jev_provider), (self.draft, draft_provider)):
             name = group.table[provider].name
@@ -745,13 +772,17 @@ class Overlay:
                           reply_target_on=self.targetSwitch.isChecked(),
                           style_text=self.styleEdit.text().strip(),
                           thinking_on=self.thinkingSwitch.isChecked(),
-                          check_update_on=self.updateSwitch.isChecked())
+                          check_update_on=self.updateSwitch.isChecked(),
+                          auto_send_on=self.autoSendSwitch.isChecked(),
+                          auto_send_whitelist_text=whitelist_text)
         except Exception:
             self._settings_feedback("保存失败，请检查配置文件是否可写后重试。", error=True)
             return
         self._load_settings()
         self._render_targets()  # 开关刚改过，回到首页时这一行该显该藏得重算一次
-        self._settings_feedback("设置已保存，将用于下一次回复。")
+        self._settings_feedback("设置已保存，将用于下一次回复。自动发送仅对白名单当前会话生效。"
+                                if self.autoSendSwitch.isChecked()
+                                else "设置已保存，将用于下一次回复。")
         self.setupButton.hide()
         if not self.cands and not self._busy:
             self._empty_text()
