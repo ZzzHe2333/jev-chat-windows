@@ -84,6 +84,28 @@ def check_update() -> bool:
     """启动时要不要去 GitHub 查一次最新版本号：默认开，只出这一次网，设置里能关。"""
     return bool(_read("check_update", True))
 
+def auto_send() -> bool:
+    """自动发送总开关。默认关闭；真正发送还必须同时通过白名单和前台窗口检查。"""
+    return bool(_read("auto_send", False))
+
+def auto_send_whitelist() -> list[str]:
+    """允许自动发送的会话名，精确匹配 OCR 到的当前会话标题。"""
+    raw = _read("auto_send_whitelist", [])
+    if isinstance(raw, str):  # 兼容手工改过 config 的旧/临时格式
+        raw = raw.replace("，", "\n").replace(",", "\n").splitlines()
+    if not isinstance(raw, list):
+        return []
+    out = []
+    for item in raw:
+        name = str(item).strip()
+        if name and name not in out:
+            out.append(name)
+    return out
+
+def auto_send_allowed(chat_title: str) -> bool:
+    """这个当前会话是否明确获准自动发送。"""
+    return auto_send() and str(chat_title).strip() in auto_send_whitelist()
+
 def _read_env(env_name: str) -> str:
     """进程环境优先；没有就读注册表并带进进程环境，之后 core/ 里按 os.environ 读就有了。"""
     v = os.environ.get(env_name, "").strip()
@@ -138,7 +160,8 @@ def save(relationship_text: str, context_n: int | None = None, *,
          llm_key_text: str | None = None, draft_model_text: str | None = None,
          draft_base_url_text: str | None = None, reply_target_on: bool | None = None,
          style_text: str | None = None, thinking_on: bool | None = None,
-         check_update_on: bool | None = None) -> None:
+         check_update_on: bool | None = None, auto_send_on: bool | None = None,
+         auto_send_whitelist_text: str | list[str] | None = None) -> None:
     """每个参数为空/None = 保留当前值。两把 key 写进程环境 + HKCU\\Environment，不写任何文件。"""
     jev = jev_provider_text if jev_provider_text in JEV_PROVIDERS else jev_provider()
     draft = draft_provider_text if draft_provider_text in DRAFT_PROVIDERS else draft_provider()
@@ -151,6 +174,18 @@ def save(relationship_text: str, context_n: int | None = None, *,
     # 空串 = 清掉，None = 原样留着（读原始字段，别读补过默认值的那个）
     keep = lambda new, name: str(_read(name) or "") if new is None else str(new).strip()
     flag = lambda new, now: now() if new is None else bool(new)
+    # 自动发送白名单也要在截断 config 前算好；每行/逗号都可输入，落盘统一为去重后的数组。
+    if auto_send_whitelist_text is None:
+        whitelist = auto_send_whitelist()
+    else:
+        raw = (auto_send_whitelist_text.replace("，", "\n").replace(",", "\n").splitlines()
+               if isinstance(auto_send_whitelist_text, str) else auto_send_whitelist_text)
+        whitelist = []
+        for item in raw:
+            name = str(item).strip()
+            if name and name not in whitelist:
+                whitelist.append(name)
+
     # 整个 dict 必须在 open(..., "w") **之前**拼好：open 一上来就把文件截断，
     # 之后再 _read() 读到的是空文件，None 那几项就不是「保留」而是被清空了。
     data = {
@@ -161,6 +196,8 @@ def save(relationship_text: str, context_n: int | None = None, *,
         "reply_target": flag(reply_target_on, reply_target),
         "thinking": flag(thinking_on, thinking),
         "check_update": flag(check_update_on, check_update),
+        "auto_send": flag(auto_send_on, auto_send),
+        "auto_send_whitelist": whitelist,
     }
     with open(_CONFIG, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False)
