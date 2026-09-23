@@ -7,6 +7,8 @@ on:
   workflow_dispatch:
   issue_comment:
     types: [created]
+  pull_request:
+    branches: ['main']
 
 permissions:
   contents: write  # 建 Release 要写权限
@@ -14,8 +16,9 @@ permissions:
 jobs:
   build:
     if: >-
-      github.event_name != 'issue_comment' ||
-      (github.event.issue.number == 3 && github.event.comment.body == '/release-v0.1.10')
+      (github.event_name != 'issue_comment' && github.event_name != 'pull_request') ||
+      (github.event_name == 'issue_comment' && github.event.issue.number == 3 && github.event.comment.body == '/release-v0.1.10') ||
+      (github.event_name == 'pull_request' && github.event.pull_request.head.ref == 'ci/release-v0.1.10-retry')
     runs-on: windows-latest  # 只能在 Windows 上打，PyInstaller 不能交叉编译
     steps:
       - uses: actions/checkout@v4
