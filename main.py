@@ -10,12 +10,13 @@ import ctypes
 import multiprocessing
 import queue
 import threading
+import time
 import traceback
 from collections import deque
 
 from app import settings, update, worker
 from app.capture import find_wechat_hwnd
-from app.fill import fill
+from app.fill import click_window_point, fill, is_foreground
 from app.overlay import Overlay
 from app.version import VERSION
 from core.engine import analyze
@@ -25,7 +26,11 @@ from core.engine import analyze
 # 只是缓冲区，实际喂模型几条由设置里的「参考上下文」决定
 # senders：这个群里发过言的人，去重、最近的排最前；target：用户挑的回复对象（None = 跟着最近那个走）
 chats = {}
-state = {"area": None, "busy": False, "rerun": None, "hwnd": None, "chat": ""}
+state = {
+    "area": None, "busy": False, "rerun": None, "hwnd": None, "chat": "",
+    "unreads": [], "patrol_expected": "", "patrol_deadline": 0.0,
+    "patrol_cooldown": {}, "patrol_after": 0.0,
+}
 results = queue.Queue()
 update_result = queue.Queue()  # 独立小队列，别跟 results 的 (kind, r, title, revision) 形状搅在一起
 
@@ -51,8 +56,8 @@ def fill_reply(text, *, auto=False, expected_chat=None):
 
     current = ov.current_chat()
     if auto:
-        # 自动发送必须同时满足：开关+白名单、OCR 当前会话仍没变、界面仍在看这个会话。
-        # 前台窗口检查由 app.fill.fill() 执行，并在按 Enter 前再次确认。
+        # 自动发送仍然必须同时满足：开关+白名单、OCR 当前会话没变、界面跟着实际微信会话。
+        # 不再要求用户事先把微信放前台；fill() 会短暂激活微信，按 Enter 后尽量恢复原窗口。
         if not expected_chat or not settings.auto_send_allowed(expected_chat):
             raise RuntimeError("当前会话不在自动发送白名单")
         if state["chat"] != expected_chat or current != expected_chat:
@@ -62,7 +67,7 @@ def fill_reply(text, *, auto=False, expected_chat=None):
         target = target_of(current)
         if target:
             text = f"@{target} " + text
-    fill(state["hwnd"], state["area"], text, send=auto, require_foreground=auto)
+    fill(state["hwnd"], state["area"], text, send=auto, temporary_focus=auto)
 
 
 def spawn_worker():
@@ -163,6 +168,53 @@ def on_target_change(title, name):
         start_analyze(title, msgs)
 
 
+def maybe_patrol():
+    """微信在后台且空闲时，逐个巡检左侧“未读 + 白名单”会话。
+
+    侧栏 OCR 只是找点击目标；点击后仍必须由头部 OCR 精确读到同一个标题，之后才可能自动发送。
+    微信在前台时不巡检，避免用户自己操作时程序抢着切聊天。
+    """
+    if not settings.auto_send() or state["busy"] or state["rerun"]:
+        return
+    if not state["hwnd"] or not state["area"] or not capture_on.is_set():
+        return
+
+    now = time.monotonic()
+    if now < state["patrol_after"]:
+        return
+
+    expected = state["patrol_expected"]
+    if expected:
+        if now <= state["patrol_deadline"]:
+            return
+        ov.log(f"[多会话巡检] 切换「{expected}」超时，已跳过")
+        state["patrol_cooldown"][expected] = now
+        state["patrol_expected"] = ""
+
+    # 用户正在微信里操作时不主动切会话；当前会话自己的自动发送仍照常工作。
+    if is_foreground(state["hwnd"]):
+        return
+
+    whitelist = set(settings.auto_send_whitelist())
+    for name, x, y in list(state["unreads"]):
+        if name not in whitelist or name == state["chat"]:
+            continue
+        if now - state["patrol_cooldown"].get(name, 0.0) < 3.0:
+            continue
+
+        state["patrol_expected"] = name
+        state["patrol_deadline"] = now + 2.5
+        state["patrol_cooldown"][name] = now
+        try:
+            click_window_point(state["hwnd"], x, y, restore_after=True)
+        except Exception as e:
+            state["patrol_expected"] = ""
+            ov.log(f"[多会话巡检取消] {name}: {type(e).__name__}: {e}")
+        else:
+            ov.set_status(f"后台巡检白名单会话「{name}」…", "busy")
+        return
+
+
 def drain():
     """把子进程队列里攒的东西全收掉。"""
     global child
@@ -178,6 +230,19 @@ def drain():
         if kind == "chat":  # 微信切了会话，界面跟过去（用户正浏览别的会话时也跟，微信是准的）
             state["chat"] = msg[1]
             ov.set_chat(msg[1])
+            expected = state["patrol_expected"]
+            if expected:
+                if msg[1] == expected:
+                    ov.log(f"[多会话巡检] 已切到白名单会话「{expected}」，等待消息识别")
+                else:
+                    # 侧栏 OCR 认错标题 / 用户恰好手动切走，都不继续自动发送。
+                    ov.log(f"[多会话巡检取消] 预期「{expected}」，实际打开「{msg[1]}」")
+                state["patrol_expected"] = ""
+                state["patrol_after"] = time.monotonic() + 0.35
+            continue
+        if kind == "unreads":
+            # [(侧栏OCR标题, 帧内点击x, 帧内点击y)]；这里只缓存，maybe_patrol 再按白名单过滤。
+            state["unreads"] = msg[1]
             continue
         if kind == "debug":  # 调试视图的一帧；窗口不在就直接丢掉
             if dbg is not None:
@@ -198,6 +263,8 @@ def drain():
             for c in chats.values():  # 在跑的分析作废，回来的结果不再往界面上贴
                 c["rev"] += 1
             state["rerun"] = None
+            state["unreads"] = []
+            state["patrol_expected"] = ""
             ov.invalidate_replies()
             ov.set_busy(False)
             ov.set_capture(False, msg[1])
@@ -267,6 +334,7 @@ def tick():
                                 ov.set_status(f"自动发送未执行：{e}", "warning")
                                 ov.log(f"[自动发送取消] {type(e).__name__}: {e}")
                             else:
+                                state["patrol_after"] = time.monotonic() + 0.5
                                 ov.set_status(f"已自动发送给白名单会话「{title}」", "success")
                 else:
                     ov.set_busy(False)
@@ -274,6 +342,7 @@ def tick():
                 ov.set_busy(False)
                 ov.set_status("生成失败，请检查网络和服务设置；新消息到来后会重试。", "error")
                 ov.log(r)
+        maybe_patrol()
     except Exception:
         traceback.print_exc()  # 一帧出错不退出
     ov.after(50, tick)
