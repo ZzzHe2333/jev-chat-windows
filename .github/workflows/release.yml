@@ -1,7 +1,5 @@
-name: Windows package
+name: Windows release
 
-# 这个分支只做可下载的 Windows 构建产物，不创建 tag / Release。
-# 正式发布仍由 main 的发布流程处理。
 on:
   push:
     branches:
@@ -9,15 +7,18 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
-  group: windows-package-${{ github.ref }}
-  cancel-in-progress: true
+  group: windows-release-v0.1.11
+  cancel-in-progress: false
 
 jobs:
-  build-windows:
-    name: Build Windows onedir
+  release-v0-1-11:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.head_commit.message == 'release: v0.1.11 (#8)'
+    name: Build and release v0.1.11
     runs-on: windows-latest
     timeout-minutes: 35
 
@@ -55,14 +56,11 @@ jobs:
           python -c "from app import settings; assert settings.auto_send() is False; assert settings.auto_send_whitelist() == []; print('settings defaults ok')"
           python -c "import app.overlay, app.debugwin; import core.engine, core.draft, core.jev_client, core.llm, core.providers, core.questions; print('critical imports ok')"
 
-      - name: Stamp development build version
+      - name: Stamp v0.1.11
         shell: pwsh
         run: |
-          $short = $env:GITHUB_SHA.Substring(0, 7)
-          $ver = "0.1.10-sync-$short"
-          Set-Content -Path app/version.py -Value ('VERSION = "' + $ver + '"') -Encoding utf8
-          "BUILD_VERSION=$ver" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "BUILD_ZIP=jev-chat-windows-$ver.zip" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Set-Content -Path app/version.py -Value 'VERSION = "0.1.11"' -Encoding utf8
+          "BUILD_ZIP=jev-chat-windows-v0.1.11.zip" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           Get-Content app/version.py
 
       - name: Build with PyInstaller
@@ -76,45 +74,54 @@ jobs:
         run: |
           $root = 'dist\jev-chat-windows'
           $exe = Join-Path $root 'jev-chat-windows.exe'
-          if (-not (Test-Path $exe)) {
-            throw "Missing executable: $exe"
-          }
+          if (-not (Test-Path $exe)) { throw "Missing executable: $exe" }
 
           $banner = Get-ChildItem -Path $root -Recurse -File -Filter 'wechat-mp.png' | Select-Object -First 1
-          if (-not $banner) {
-            throw "Missing packaged resource: docs/wechat-mp.png"
-          }
+          if (-not $banner) { throw "Missing packaged resource: docs/wechat-mp.png" }
 
           Copy-Item -Path LICENSE, NOTICE -Destination $root -Force
           if (-not (Test-Path (Join-Path $root 'LICENSE'))) { throw "LICENSE was not copied" }
           if (-not (Test-Path (Join-Path $root 'NOTICE'))) { throw "NOTICE was not copied" }
 
-          $exeInfo = Get-Item $exe
-          $fileCount = (Get-ChildItem -Path $root -Recurse -File).Count
-          $totalBytes = (Get-ChildItem -Path $root -Recurse -File | Measure-Object -Property Length -Sum).Sum
-          "Executable: {0:N1} MB" -f ($exeInfo.Length / 1MB)
-          "Files: $fileCount"
-          "Onedir size: {0:N1} MB" -f ($totalBytes / 1MB)
-          "Banner: $($banner.FullName)"
-
-      - name: Create ZIP
+      - name: Create release ZIP
         shell: pwsh
         run: |
-          if (Test-Path $env:BUILD_ZIP) {
-            Remove-Item $env:BUILD_ZIP -Force
-          }
+          if (Test-Path $env:BUILD_ZIP) { Remove-Item $env:BUILD_ZIP -Force }
           Compress-Archive -Path 'dist\jev-chat-windows' -DestinationPath $env:BUILD_ZIP -CompressionLevel Optimal
-          if (-not (Test-Path $env:BUILD_ZIP)) {
-            throw "ZIP was not created"
-          }
-          "ZIP: $env:BUILD_ZIP"
-          "ZIP size: {0:N1} MB" -f ((Get-Item $env:BUILD_ZIP).Length / 1MB)
+          if (-not (Test-Path $env:BUILD_ZIP)) { throw "ZIP was not created" }
 
-      - name: Upload Windows package
+          $hash = (Get-FileHash -Algorithm SHA256 $env:BUILD_ZIP).Hash.ToLower()
+          "ZIP_SHA256=$hash" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "ZIP size: {0:N1} MB" -f ((Get-Item $env:BUILD_ZIP).Length / 1MB)
+          "SHA256: $hash"
+
+      - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: jev-chat-windows-${{ github.sha }}
-          path: jev-chat-windows-0.1.10-sync-*.zip
+          name: jev-chat-windows-v0.1.11
+          path: jev-chat-windows-v0.1.11.zip
           if-no-files-found: error
           compression-level: 0
           retention-days: 14
+
+      - name: Publish GitHub Release v0.1.11
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v0.1.11
+          target_commitish: ${{ github.sha }}
+          name: v0.1.11
+          prerelease: false
+          draft: false
+          make_latest: true
+          files: jev-chat-windows-v0.1.11.zip
+          body: |
+            正式版 v0.1.11
+
+            基于上游 v0.1.10，同步保留上游新增功能，并加入下游白名单自动发送：
+            - 自动发送默认关闭
+            - 仅对 OCR 当前会话标题精确匹配的白名单会话生效
+            - 微信主窗口必须保持为 Windows 当前前台窗口
+            - 会话切换、白名单不匹配或窗口失焦时取消自动发送，不补发
+            - 保留上游调试视图、OpenCode Go、三段式 Jev、Win10 采集修复等更新
+
+            Windows onedir 构建，需解压完整 ZIP 后运行。
