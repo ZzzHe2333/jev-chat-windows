@@ -92,7 +92,7 @@ class Capture:
         from windows_capture import WindowsCapture
 
         self.settle, self.max_wait = settle, max_wait
-        self.shape = self.area = self.last = self.pending = None
+        self.shape = self.area = self.last = self.last_badges = self.pending = None
         self.t = self.t0 = 0.0
         # 包装层默认 cursor_capture=True，会去调 SetIsCursorCaptureEnabled。
         # 这个属性要 Win10 2004（build 19041）才有，1909 及更早直接抛 CursorConfigUnsupported。
@@ -113,9 +113,15 @@ class Capture:
         x0, y0, x1, y1 = self.area[:4]  # 拿上一次的消息区做 diff 就够了，光标闪烁在输入框里，不算变化
         # ponytail: diff 不含头部——公告条会滚动，带上它就永远停不稳。切会话时消息区必然也变，照样出帧。
         chat = full[y0:y1, x0:x1]
-        if self.last is not None and np.array_equal(chat, self.last):
+        # 多会话巡检还要看左侧会话列表靠右的未读红点区域。只比较这一条窄带，
+        # 不把整块联系人列表算进 diff，避免头像/时间变化让 OCR 一直忙。
+        badge_strip = full[:, max(0, x0 - 120):x0]
+        if (self.last is not None and self.last_badges is not None
+                and np.array_equal(chat, self.last)
+                and np.array_equal(badge_strip, self.last_badges)):
             return
-        self.last = chat
+        self.last = chat.copy()
+        self.last_badges = badge_strip.copy()
         if self.pending is None:
             self.t0 = time.perf_counter()
         self.pending, self.t = full, time.perf_counter()
