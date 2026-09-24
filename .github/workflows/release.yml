@@ -50,6 +50,7 @@ jobs:
           python core/engine.py
           python -c "from app import settings; assert settings.auto_send() is False; assert settings.auto_send_whitelist() == []; print('settings defaults ok')"
           python -c "import app.overlay, app.debugwin; import core.engine, core.draft, core.jev_client, core.llm, core.providers, core.questions; print('critical imports ok')"
+          python -m unittest discover -s tests -q
 
       - name: Stamp development build version
         shell: pwsh
