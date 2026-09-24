@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""把候选写进微信输入框。默认只填入；自动发送必须由调用方显式开启，并可要求微信仍是前台窗口。"""
+"""把候选写进微信输入框。默认只填入；自动发送可短暂激活微信，完成后尽量恢复原前台窗口。"""
 import ctypes
 import ctypes.wintypes as w
 import time
@@ -47,15 +47,83 @@ def set_clipboard(text):
 
 
 def is_foreground(hwnd):
-    """只有目标微信主窗口本身是系统当前前台窗口才算通过。"""
+    """目标微信主窗口是否就是系统当前前台窗口。"""
     return bool(hwnd and u32.GetForegroundWindow() == hwnd)
 
 
-def fill(hwnd, area, text, *, send=False, require_foreground=False):
+def _focus_window(hwnd):
+    """把 hwnd 临时拉到前台，返回之前的前台窗口。Windows 限制前台切换，借当前前台线程放行。"""
+    from app.capture import unminimize
+
+    if not hwnd or not u32.IsWindow(hwnd):
+        raise RuntimeError("微信窗口已失效")
+    previous = u32.GetForegroundWindow()
+    unminimize(hwnd)
+    if previous == hwnd:
+        return previous
+
+    our_tid = k32.GetCurrentThreadId()
+    fg_tid = u32.GetWindowThreadProcessId(previous, None) if previous else 0
+    attached = bool(fg_tid and fg_tid != our_tid and u32.AttachThreadInput(our_tid, fg_tid, True))
+    try:
+        u32.BringWindowToTop(hwnd)
+        u32.SetForegroundWindow(hwnd)
+    finally:
+        if attached:
+            u32.AttachThreadInput(our_tid, fg_tid, False)
+    time.sleep(0.12)
+    if not is_foreground(hwnd):
+        raise RuntimeError("无法临时激活微信窗口")
+    return previous
+
+
+def _restore_window(previous, owned_hwnd):
+    """仅当焦点仍是我们刚激活的微信时才恢复，避免覆盖用户中途主动切到的新窗口。"""
+    if not previous or previous == owned_hwnd or not u32.IsWindow(previous):
+        return
+    if u32.GetForegroundWindow() != owned_hwnd:
+        return
+    our_tid = k32.GetCurrentThreadId()
+    cur_tid = u32.GetWindowThreadProcessId(owned_hwnd, None)
+    attached = bool(cur_tid and cur_tid != our_tid and u32.AttachThreadInput(our_tid, cur_tid, True))
+    try:
+        u32.SetForegroundWindow(previous)
+    finally:
+        if attached:
+            u32.AttachThreadInput(our_tid, cur_tid, False)
+
+
+def _window_rect(hwnd):
+    r = w.RECT()
+    if ctypes.windll.dwmapi.DwmGetWindowAttribute(hwnd, 9, ctypes.byref(r), ctypes.sizeof(r)) != 0:
+        u32.GetWindowRect(hwnd, ctypes.byref(r))
+    return r
+
+
+def click_window_point(hwnd, x, y, *, restore_after=True):
+    """点击 WGC 帧坐标中的一个点。用于后台巡检切换左侧白名单会话。"""
+    previous = _focus_window(hwnd)
+    try:
+        r = _window_rect(hwnd)
+        old = w.POINT()
+        u32.GetCursorPos(ctypes.byref(old))
+        u32.SetCursorPos(r.left + int(x), r.top + int(y))
+        time.sleep(0.04)
+        u32.mouse_event(0x2, 0, 0, 0, 0)
+        u32.mouse_event(0x4, 0, 0, 0, 0)
+        time.sleep(0.08)
+        u32.SetCursorPos(old.x, old.y)
+    finally:
+        if restore_after:
+            _restore_window(previous, hwnd)
+
+
+def fill(hwnd, area, text, *, send=False, require_foreground=False, temporary_focus=False):
     """area = 消息区 (x0, y0, x1, y1)；输入框就在底线 y1 下面。
 
-    send=False 保持原行为，只填入不发送。
-    require_foreground=True 时绝不抢焦点：只要微信不是当前前台窗口就立即取消。
+    send=False：只填入，不发送。
+    require_foreground=True：保持旧的严格模式，微信不是前台就取消。
+    temporary_focus=True：允许短暂激活微信完成操作，结束后尽量恢复之前的前台窗口。
     """
     from app.capture import unminimize
 
@@ -63,57 +131,53 @@ def fill(hwnd, area, text, *, send=False, require_foreground=False):
         raise RuntimeError("自动发送已取消：微信不是当前前台窗口")
 
     set_clipboard(text)
-    r = w.RECT()
-    if ctypes.windll.dwmapi.DwmGetWindowAttribute(hwnd, 9, ctypes.byref(r), ctypes.sizeof(r)) != 0:  # 扩展边界，跟 WGC 帧对齐
-        u32.GetWindowRect(hwnd, ctypes.byref(r))
-    x0, _, _, y1 = area
-    cx, cy = r.left + x0 + 60, r.top + y1 + 40  # 分隔线下 40px = 输入框文字区；工具栏和「发送」在输入区最底下，碰不到
-    if require_foreground:
-        # 自动发送不能帮用户切窗口；检查失败就保持候选在界面里，交给用户手动处理。
-        if not is_foreground(hwnd):
-            raise RuntimeError("自动发送已取消：微信不再是当前前台窗口")
+    previous = u32.GetForegroundWindow()
+    if temporary_focus:
+        previous = _focus_window(hwnd)
     else:
         unminimize(hwnd)
+        if not is_foreground(hwnd):
+            # 手动“填入微信”沿用原来的抢焦点行为，不恢复。
+            _focus_window(hwnd)
 
-    # 手动“填入微信”沿用原来的抢焦点行为；自动发送路径绝不走这里。
-    fg = u32.GetForegroundWindow()
-    if fg != hwnd:
-        if require_foreground:
-            raise RuntimeError("自动发送已取消：微信不再是当前前台窗口")
-        fg_tid = u32.GetWindowThreadProcessId(fg, None)
-        our_tid = k32.GetCurrentThreadId()
-        u32.AttachThreadInput(our_tid, fg_tid, True)
-        u32.SetForegroundWindow(hwnd)
-        u32.AttachThreadInput(our_tid, fg_tid, False)
-        time.sleep(0.15)  # 给微信一点时间响应前台切换
+    try:
+        if not is_foreground(hwnd):
+            raise RuntimeError("微信没有获得输入焦点")
 
-    old = w.POINT()
-    u32.GetCursorPos(ctypes.byref(old))
-    u32.SetCursorPos(cx, cy)
-    time.sleep(0.05)
-    u32.mouse_event(0x2, 0, 0, 0, 0)  # 左键按下
-    u32.mouse_event(0x4, 0, 0, 0, 0)  # 抬起
-    time.sleep(0.05)
-    u32.SetCursorPos(old.x, old.y)
-    time.sleep(0.05)
-    # 光标移到已有文本的绝对末尾：点击落在文字中间时 caret 会插在中间，
-    # 连续多次填入就串行错乱；Ctrl+End 保证新内容永远追加在最后
-    u32.keybd_event(0x11, 0, 0, 0)  # Ctrl 按下
-    u32.keybd_event(0x23, 0, 0, 0)  # End 按下（VK_END）
-    u32.keybd_event(0x23, 0, 2, 0)  # End 抬起
-    u32.keybd_event(0x11, 0, 2, 0)  # Ctrl 抬起
-    time.sleep(0.05)
-    u32.keybd_event(0x11, 0, 0, 0)  # Ctrl
-    u32.keybd_event(0x56, 0, 0, 0)  # V
-    u32.keybd_event(0x56, 0, 2, 0)
-    u32.keybd_event(0x11, 0, 2, 0)
+        r = _window_rect(hwnd)
+        x0, _, _, y1 = area
+        cx, cy = r.left + x0 + 60, r.top + y1 + 40
 
-    if not send:
-        return
+        old = w.POINT()
+        u32.GetCursorPos(ctypes.byref(old))
+        u32.SetCursorPos(cx, cy)
+        time.sleep(0.05)
+        u32.mouse_event(0x2, 0, 0, 0, 0)
+        u32.mouse_event(0x4, 0, 0, 0, 0)
+        time.sleep(0.05)
+        u32.SetCursorPos(old.x, old.y)
+        time.sleep(0.05)
 
-    # 自动发送最后一道闸门：粘贴完成后再确认一次前台窗口，避免用户在这几十毫秒里切走。
-    if require_foreground and not is_foreground(hwnd):
-        raise RuntimeError("自动发送已取消：粘贴后微信失去前台焦点，内容已填入但没有发送")
-    time.sleep(0.08)
-    u32.keybd_event(0x0D, 0, 0, 0)  # Enter
-    u32.keybd_event(0x0D, 0, 2, 0)
+        # 点击可能落在已有文本中间，先 Ctrl+End，再追加候选。
+        u32.keybd_event(0x11, 0, 0, 0)
+        u32.keybd_event(0x23, 0, 0, 0)
+        u32.keybd_event(0x23, 0, 2, 0)
+        u32.keybd_event(0x11, 0, 2, 0)
+        time.sleep(0.05)
+        u32.keybd_event(0x11, 0, 0, 0)
+        u32.keybd_event(0x56, 0, 0, 0)
+        u32.keybd_event(0x56, 0, 2, 0)
+        u32.keybd_event(0x11, 0, 2, 0)
+
+        if not send:
+            return
+
+        # 最后一道闸门：真正按 Enter 前目标微信必须仍在前台。
+        if not is_foreground(hwnd):
+            raise RuntimeError("自动发送已取消：粘贴后微信失去焦点，内容已填入但没有发送")
+        time.sleep(0.08)
+        u32.keybd_event(0x0D, 0, 0, 0)
+        u32.keybd_event(0x0D, 0, 2, 0)
+    finally:
+        if temporary_focus:
+            _restore_window(previous, hwnd)
