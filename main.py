@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """父进程：只管界面。截图 + OCR 在 app/worker.py 的子进程里跑，队列里收新消息 →
-冒出新的对方消息才调 engine → 悬浮窗给 3 条候选。默认手动填入；可选自动发送仅对白名单会话生效，且微信必须保持前台。静默期零调用。
+冒出新的对方消息才调 engine → 悬浮窗给 3 条候选。默认手动填入；可选自动发送仅对白名单会话生效，后台可巡检左侧未读白名单并短暂激活微信完成发送。静默期零调用。
 上下文、结果、聊天记录都按会话名（子进程 OCR 头部标题得来）分开存，切会话不串味。
 
     pip install rapidocr-onnxruntime numpy windows-capture PySide6-Fluent-Widgets
