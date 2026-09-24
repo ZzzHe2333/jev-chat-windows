@@ -85,7 +85,7 @@ def check_update() -> bool:
     return bool(_read("check_update", True))
 
 def auto_send() -> bool:
-    """自动发送总开关。默认关闭；真正发送还必须同时通过白名单和前台窗口检查。"""
+    """自动发送总开关。默认关闭；后台巡检和发送都只对白名单生效。"""
     return bool(_read("auto_send", False))
 
 def auto_send_whitelist() -> list[str]:
