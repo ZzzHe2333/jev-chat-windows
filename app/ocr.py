@@ -33,6 +33,99 @@ def read_title(header):
     return re.sub(r"\s*[（(]\d+[)）]\s*$", "", text.strip())
 
 
+def unread_badge_rows(sidebar):
+    """找左侧会话列表里的红色未读提示，返回相对 sidebar 的 y 中心。
+
+    只扫右侧 120px：头像里的红色不会落进来。阈值故意偏宽，兼容深浅主题和抗锯齿。
+    这里是纯 numpy，方便做无微信的单元测试。
+    """
+    if sidebar is None or sidebar.size == 0:
+        return []
+    h, w = sidebar.shape[:2]
+    if h < 8 or w < 40:
+        return []
+    x0 = max(0, w - 120)
+    band = sidebar[:, x0:w].astype(np.int16)
+    r, g, b = band[..., 0], band[..., 1], band[..., 2]
+    red = (r >= 180) & (r - g >= 55) & (r - b >= 55) & (g <= 165)
+    ys = np.where(red.sum(axis=1) >= 2)[0]
+    if not len(ys):
+        return []
+
+    groups, cur = [], [int(ys[0])]
+    for y in ys[1:]:
+        y = int(y)
+        if y - cur[-1] <= 2:
+            cur.append(y)
+        else:
+            groups.append(cur)
+            cur = [y]
+    groups.append(cur)
+
+    out = []
+    for group in groups:
+        height = group[-1] - group[0] + 1
+        # 普通红点/数字角标通常 6~28px 高；太细多半是文字，太大多半是图片。
+        if 4 <= height <= 36:
+            out.append((group[0] + group[-1]) // 2)
+    return out
+
+
+def read_unread_chats(full, panel_x0, y_start=0):
+    """识别左侧列表里有未读红点的会话，返回 [(标题, 点击x, 点击y)]。
+
+    先用像素找红点行，再只从这些行附近的 OCR 文字里选标题。标题只是候选，
+    真正自动发送前父进程还会再用头部 OCR 精确核对一次。
+    """
+    if full is None or full.size == 0 or panel_x0 < 90:
+        return []
+    h = full.shape[0]
+    y_start = max(0, min(int(y_start), h - 1))
+    sidebar = full[y_start:h, :panel_x0]
+    rows = unread_badge_rows(sidebar)
+    if not rows:
+        return []
+
+    res, _ = _engine()(sidebar, use_cls=False)
+    boxes = []
+    for item in res or []:
+        try:
+            box, text, score = item
+            text = str(text).strip()
+            xs, ys = [p[0] for p in box], [p[1] for p in box]
+        except Exception:
+            continue
+        if not text or len(text) > 48:
+            continue
+        if re.fullmatch(r"[\d:：./\- ]+", text):
+            continue
+        left, right = float(min(xs)), float(max(xs))
+        top, bottom = float(min(ys)), float(max(ys))
+        cx, cy = (left + right) / 2, (top + bottom) / 2
+        height = bottom - top
+        # 左边导航栏不要，最右侧时间/未读数字也不要。
+        if left < 45 or right > panel_x0 - 55:
+            continue
+        boxes.append((text, cx, cy, height, left))
+
+    found = []
+    used = set()
+    for row_y in rows:
+        candidates = []
+        for text, cx, cy, height, left in boxes:
+            if abs(cy - row_y) <= 32:
+                # 标题通常在红点中心略上方；优先靠上的大字，再看左侧位置。
+                candidates.append((abs(cy - (row_y - 8)), -height, left, text, cx))
+        if not candidates:
+            continue
+        _, _, _, text, cx = min(candidates)
+        if text in used:
+            continue
+        used.add(text)
+        found.append((text, int(cx), int(y_start + row_y)))
+    return found
+
+
 def who_said(chat, box):
     """按 OCR 框里的颜色分类，不看 x 坐标。返回 (谁, 底色, 墨高)：
     先看底色平不平：框里众数颜色占比 <45% 就是图片（头像/照片/表情包）里的字 → None 丢掉。
