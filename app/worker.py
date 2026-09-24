@@ -9,7 +9,7 @@ import traceback
 import numpy as np
 
 from app.capture import Capture, chat_area, unminimize
-from app.ocr import Reader, read_title, similar
+from app.ocr import Reader, read_title, read_unread_chats, similar
 
 
 def _err(q):
@@ -39,6 +39,8 @@ def run(q, hwnd, enabled, debug_on):
     readers = {}  # {会话名: Reader}，一个会话一套去重状态
     title, head = "", None  # 当前会话名 / 上一帧的头部像素
     last_area = None  # 上次发给父进程的 4 元组，变了才再发一次
+    last_unreads = None  # 左侧未读候选变了才通知父进程
+    last_unread_scan = 0.0  # 侧栏 OCR 比像素检测贵，做个轻量节流
     warned = False  # 消息区识别失败是否已经报过，拖窗口时别每帧刷一条
     while True:
         if not enabled.is_set():
@@ -92,6 +94,16 @@ def run(q, hwnd, enabled, debug_on):
                     new = reader.new_lines(lines)
                     if new:
                         q.put(("lines", title, new, rect))
+
+                    # 其他会话的未读红点会让 Capture 醒来。最多每 0.7s OCR 一次侧栏，
+                    # 只把“标题候选 + 点击点”交给父进程；父进程按白名单精确过滤。
+                    now = time.monotonic()
+                    if now - last_unread_scan >= 0.7:
+                        last_unread_scan = now
+                        unreads = tuple(read_unread_chats(full, x0, y_pane + 35))
+                        if unreads != last_unreads:
+                            last_unreads = unreads
+                            q.put(("unreads", list(unreads)))
                 if debug_on.is_set():
                     q.put(("debug", _packet(full, area, title, reader, lines)))
         except Exception:
