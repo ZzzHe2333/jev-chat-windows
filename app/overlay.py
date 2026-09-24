@@ -306,7 +306,7 @@ class Overlay:
         self._build_settings()
         footer = QHBoxLayout()
         footer.setContentsMargins(20, 9, 8, 8)
-        footer.addWidget(_label(f"默认手动发送 · 自动发送仅限白名单且微信须在前台 · v{VERSION}", 11, _MUTED), 1)
+        footer.addWidget(_label(f"默认手动发送 · 自动发送支持白名单后台巡检 · v{VERSION}", 11, _MUTED), 1)
         grip = QSizeGrip(self.win)
         grip.setFixedSize(16, 16)
         footer.addWidget(grip, 0, Qt.AlignBottom)
@@ -555,8 +555,9 @@ class Overlay:
         whitelist_label.setBuddy(self.autoWhitelistEdit)
         box.addWidget(self.autoWhitelistEdit)
         box.addWidget(self._hint(
-            "默认关闭。开启后只对这里精确匹配的当前会话自动发送推荐回复；生成完成时微信主窗口"
-            "还必须是系统前台窗口，否则只保留候选、不发送。"
+            "默认关闭。开启后可在后台巡检左侧有未读红点的白名单会话：先按侧栏标题精确匹配，"
+            "切换后再用头部标题二次核对。切换/发送时会短暂激活微信，完成后尽量恢复原窗口；"
+            "你正在微信里操作时不会主动切会话。"
         ))
         update_row = QHBoxLayout()
         update_row.addWidget(_label("启动时检查更新", 13), 1)
@@ -854,7 +855,7 @@ class Overlay:
             return
         self._load_settings()
         self._render_targets()  # 开关刚改过，回到首页时这一行该显该藏得重算一次
-        self._settings_feedback("设置已保存，将用于下一次回复。自动发送仅对白名单当前会话生效。"
+        self._settings_feedback("设置已保存，将用于下一次回复。自动发送会对白名单未读会话做后台巡检。"
                                 if self.autoSendSwitch.isChecked()
                                 else "设置已保存，将用于下一次回复。")
         self.setupButton.hide()
