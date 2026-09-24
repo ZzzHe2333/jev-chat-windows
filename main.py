@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """父进程：只管界面。截图 + OCR 在 app/worker.py 的子进程里跑，队列里收新消息 →
-冒出新的对方消息才调 engine → 悬浮窗给 3 条候选 → 人点「填入」。发送永远手动。静默期零调用。
+冒出新的对方消息才调 engine → 悬浮窗给 3 条候选。默认手动填入；可选自动发送仅对白名单会话生效，且微信必须保持前台。静默期零调用。
 上下文、结果、聊天记录都按会话名（子进程 OCR 头部标题得来）分开存，切会话不串味。
 
     pip install rapidocr-onnxruntime numpy windows-capture PySide6-Fluent-Widgets
@@ -43,16 +43,26 @@ def target_of(title):
     return chat["senders"][0] if chat["senders"] else None
 
 
-def fill_reply(text):
+def fill_reply(text, *, auto=False, expected_chat=None):
     if state["hwnd"] is None:  # 子进程重开过，hwnd 可能换了，用最新的
         raise RuntimeError("未找到微信窗口，请确认微信已打开")
     if state["area"] is None:
         raise RuntimeError("微信输入区域尚不可用，请确认微信聊天窗口可见（不要最小化）")
+
+    current = ov.current_chat()
+    if auto:
+        # 自动发送必须同时满足：开关+白名单、OCR 当前会话仍没变、界面仍在看这个会话。
+        # 前台窗口检查由 app.fill.fill() 执行，并在按 Enter 前再次确认。
+        if not expected_chat or not settings.auto_send_allowed(expected_chat):
+            raise RuntimeError("当前会话不在自动发送白名单")
+        if state["chat"] != expected_chat or current != expected_chat:
+            raise RuntimeError("当前会话已变化，自动发送已取消")
+
     if settings.reply_target() and ov.at_prefix_enabled():
-        target = target_of(ov.current_chat())  # 填进去的是界面上正看着的那个会话的对象
+        target = target_of(current)
         if target:
-            text = f"@{target} " + text  # 纯文本，微信不认成真正的 @，只是让群里看得出在跟谁说
-    fill(state["hwnd"], state["area"], text)
+            text = f"@{target} " + text
+    fill(state["hwnd"], state["area"], text, send=auto, require_foreground=auto)
 
 
 def spawn_worker():
@@ -244,6 +254,20 @@ def tick():
                 chat_of(title)["result"] = r  # 先存着；正看着这个会话才立刻贴上去
                 if title == ov.current_chat():
                     ov.show(r)
+                    if settings.auto_send_allowed(title):
+                        cands = r.get("candidates") or []
+                        best = r.get("best_index", 0)
+                        if best not in range(len(cands)):
+                            best = 0
+                        if cands:
+                            try:
+                                fill_reply(cands[best], auto=True, expected_chat=title)
+                            except Exception as e:
+                                # 不自动补发；候选仍留在界面，用户可手动确认。
+                                ov.set_status(f"自动发送未执行：{e}", "warning")
+                                ov.log(f"[自动发送取消] {type(e).__name__}: {e}")
+                            else:
+                                ov.set_status(f"已自动发送给白名单会话「{title}」", "success")
                 else:
                     ov.set_busy(False)
             else:
