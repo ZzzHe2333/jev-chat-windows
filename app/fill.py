@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""把选中的候选填进微信输入框：写剪贴板 → 点输入框 → Ctrl+V。绝不发回车、绝不点发送。"""
+"""把候选写进微信输入框。默认只填入；自动发送必须由调用方显式开启，并可要求微信仍是前台窗口。"""
 import ctypes
 import ctypes.wintypes as w
 import time
@@ -46,9 +46,21 @@ def set_clipboard(text):
     raise RuntimeError("OpenClipboard 连续失败，剪贴板被其他程序占用")
 
 
-def fill(hwnd, area, text):
-    """area = 消息区 (x0, y0, x1, y1)；输入框就在底线 y1 下面。"""
+def is_foreground(hwnd):
+    """只有目标微信主窗口本身是系统当前前台窗口才算通过。"""
+    return bool(hwnd and u32.GetForegroundWindow() == hwnd)
+
+
+def fill(hwnd, area, text, *, send=False, require_foreground=False):
+    """area = 消息区 (x0, y0, x1, y1)；输入框就在底线 y1 下面。
+
+    send=False 保持原行为，只填入不发送。
+    require_foreground=True 时绝不抢焦点：只要微信不是当前前台窗口就立即取消。
+    """
     from app.capture import unminimize
+
+    if require_foreground and not is_foreground(hwnd):
+        raise RuntimeError("自动发送已取消：微信不是当前前台窗口")
 
     set_clipboard(text)
     r = w.RECT()
@@ -56,11 +68,18 @@ def fill(hwnd, area, text):
         u32.GetWindowRect(hwnd, ctypes.byref(r))
     x0, _, _, y1 = area
     cx, cy = r.left + x0 + 60, r.top + y1 + 40  # 分隔线下 40px = 输入框文字区；工具栏和「发送」在输入区最底下，碰不到
-    unminimize(hwnd)
+    if require_foreground:
+        # 自动发送不能帮用户切窗口；检查失败就保持候选在界面里，交给用户手动处理。
+        if not is_foreground(hwnd):
+            raise RuntimeError("自动发送已取消：微信不再是当前前台窗口")
+    else:
+        unminimize(hwnd)
 
-    # SetForegroundWindow 有前台窗口保护，普通后台进程会被拒；AttachThreadInput 绕过
+    # 手动“填入微信”沿用原来的抢焦点行为；自动发送路径绝不走这里。
     fg = u32.GetForegroundWindow()
     if fg != hwnd:
+        if require_foreground:
+            raise RuntimeError("自动发送已取消：微信不再是当前前台窗口")
         fg_tid = u32.GetWindowThreadProcessId(fg, None)
         our_tid = k32.GetCurrentThreadId()
         u32.AttachThreadInput(our_tid, fg_tid, True)
@@ -88,4 +107,13 @@ def fill(hwnd, area, text):
     u32.keybd_event(0x56, 0, 0, 0)  # V
     u32.keybd_event(0x56, 0, 2, 0)
     u32.keybd_event(0x11, 0, 2, 0)
-    # 到此为止。发不发、改不改，人来。
+
+    if not send:
+        return
+
+    # 自动发送最后一道闸门：粘贴完成后再确认一次前台窗口，避免用户在这几十毫秒里切走。
+    if require_foreground and not is_foreground(hwnd):
+        raise RuntimeError("自动发送已取消：粘贴后微信失去前台焦点，内容已填入但没有发送")
+    time.sleep(0.08)
+    u32.keybd_event(0x0D, 0, 0, 0)  # Enter
+    u32.keybd_event(0x0D, 0, 2, 0)
