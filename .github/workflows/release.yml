@@ -4,6 +4,7 @@ name: release
 on:
   push:
     tags: ['v*']
+    branches: ['sync/upstream-20260924']
   workflow_dispatch:
 
 permissions:
